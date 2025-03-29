@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+
+    environment {
+        STACK_NAME = "monitoring"
+        DOCKER_HUB_REPO = "moonyrise/monitor"
+    }
+
+    stages {
+        stage('Check and Leave Swarm if Needed') {
+            steps {
+                script {
+                    sh '''
+                    if docker info | grep -q "Swarm: active"; then
+                        echo "Swarm уже запущен, перезапускаем..."
+                        docker swarm leave --force
+                        sleep 5
+                    fi
+                    docker swarm init || true
+                    '''
+                }
+            }
+        }
+
+        stage('Cleanup Old Stack') {
+            steps {
+                script {
+                    sh 'docker stack rm $STACK_NAME || true'
+                    sh 'docker system prune -f'
+                }
+            }
+        }
+
+        stage('Build & Push Backend and Frontend') {
+            steps {
+                script {
+                    sh 'docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/'
+                    sh 'docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/'
+                    
+                    sh 'docker tag bek $DOCKER_HUB_REPO:bek'
+                    sh 'docker tag front $DOCKER_HUB_REPO:front'
+
+                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
+                    }
+
+                    sh 'docker push $DOCKER_HUB_REPO:bek'
+                    sh 'docker push $DOCKER_HUB_REPO:front'
+                }
+            }
+        }
+
+        stage('Deploy Database') {
+            steps {
+                script {
+                    sh '''
+                    docker service create --name sql111 \
+                        --hostname sql1 \
+                        -e "ACCEPT_EULA=Y" \
+                        -e "MSSQL_SA_PASSWORD=Qwerty-1" \
+                        -p 1433:1433 \
+                        --detach=true \
+                        mcr.microsoft.com/mssql/server:2022-latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Stack') {
+            steps {
+                script {
+                    sh 'docker stack deploy -c /var/lib/jenkins/workspace/Diplom_moon/docker-compose.yml $STACK_NAME'
+                }
+            }
+        }
+
+        stage('Check Services') {
+            steps {
+                script {
+                    sh 'docker service ls'
+                }
+            }
+        }
+
+        stage('Deploy Monitoring Services') {
+            steps {
+                script {
+                    sh 'chmod +x run.sh && bash run.sh'
+                }
+            }
+        }
+
+        stage('Push Monitoring Images') {
+            steps {
+                script {
+                    def images = ['grafana', 'prometheus', 'node-exporter', 'alertmanager', 'cadvisor']
+                    for (img in images) {
+                        sh "docker pull prom/${img}:latest || docker pull gcr.io/cadvisor/cadvisor:latest"
+                        sh "docker tag prom/${img}:latest $DOCKER_HUB_REPO:${img}"
+                        sh "docker push $DOCKER_HUB_REPO:${img}"
+                    }
+                }
+            }
+        }
+
+        stage('Show Access Info') {
+            steps {
+                script {
+                    echo "✅ **Доступ к сервисам:**"
+                    echo "📌 **Frontend:** http://<VM_IP>:81"
+                    echo "📌 **Backend:** http://<VM_IP>:5034"
+                    echo "📌 **Grafana:** http://<VM_IP>:3000"
+                    echo "📌 **Prometheus:** http://<VM_IP>:9090"
+                    echo "📌 **AlertManager:** http://<VM_IP>:9093"
+                    echo "📌 **Node Exporter:** http://<VM_IP>:9100"
+                    echo "📌 **cAdvisor:** http://<VM_IP>:8080"
+                }
+            }
+        }
+    }
+}
