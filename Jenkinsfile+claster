@@ -34,8 +34,8 @@ pipeline {
         stage('Build & Push Backend and Frontend') {
             steps {
                 script {
-                    sh 'docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/'
-                    sh 'docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/'
+                    sh 'docker build -t bek /var/lib/jenkins/workspace/Diplom_claster/BackEnd/Amazon-clone/'
+                    sh 'docker build -t front /var/lib/jenkins/workspace/Diplom_claster/FrontEnd/my-app/'
                     
                     sh 'docker tag bek $DOCKER_HUB_REPO:bek'
                     sh 'docker tag front $DOCKER_HUB_REPO:front'
@@ -69,7 +69,7 @@ pipeline {
         stage('Deploy Stack') {
             steps {
                 script {
-                    sh 'docker stack deploy -c /var/lib/jenkins/workspace/Diplom_moon/docker-compose.yml $STACK_NAME'
+                    sh 'docker stack deploy -c /var/lib/jenkins/workspace/Diplom_claster/docker-compose.yml $STACK_NAME'
                 }
             }
         }
