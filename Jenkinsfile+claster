@@ -1,66 +1,112 @@
 pipeline {
     agent any
 
-    environment {
-        STACK_NAME = "monitoring"
-        DOCKER_HUB_REPO = "moonyrise/monitor"
-    }
-
     stages {
-        stage('Check and Leave Swarm if Needed') {
+        stage('Cleanup old containers') {
+            steps {
+                script {
+                    sh 'docker rm -f bek || true'
+                    sh 'docker rm -f front || true'
+                    sh 'docker rm -f sql111 || true'
+                }
+            }
+        }
+
+        stage('Initialize Swarm') {
             steps {
                 script {
                     sh '''
-                    if docker info | grep -q "Swarm: active"; then
-                        echo "Swarm уже запущен, перезапускаем..."
-                        docker swarm leave --force
-                        sleep 5
+                    if ! docker info | grep -q "Swarm: active"; then
+                        docker swarm init --advertise-addr $(hostname -I | awk '{print $1}')
                     fi
-                    docker swarm init || true
                     '''
                 }
             }
         }
 
-        stage('Cleanup Old Stack') {
+        stage('Create Network') {
             steps {
                 script {
-                    sh 'docker stack rm $STACK_NAME || true'
-                    sh 'docker system prune -f'
+                    sh 'docker network create mynetwork || true'
                 }
             }
         }
 
-        stage('Build & Push Backend and Frontend') {
-            steps {
-                script {
-                    sh 'docker build -t bek /var/lib/jenkins/workspace/Diplom_claster/BackEnd/Amazon-clone/'
-                    sh 'docker build -t front /var/lib/jenkins/workspace/Diplom_claster/FrontEnd/my-app/'
-                    
-                    sh 'docker tag bek $DOCKER_HUB_REPO:bek'
-                    sh 'docker tag front $DOCKER_HUB_REPO:front'
-
-                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                        sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
-                    }
-
-                    sh 'docker push $DOCKER_HUB_REPO:bek'
-                    sh 'docker push $DOCKER_HUB_REPO:front'
-                }
-            }
-        }
-
-        stage('Deploy Database') {
+        stage('Create Database') {
             steps {
                 script {
                     sh '''
-                    docker service create --name sql111 \
+                    docker run -d \
+                        --name sql111 \
                         --hostname sql1 \
+                        --network mynetwork \
                         -e "ACCEPT_EULA=Y" \
                         -e "MSSQL_SA_PASSWORD=Qwerty-1" \
                         -p 1433:1433 \
-                        --detach=true \
                         mcr.microsoft.com/mssql/server:2022-latest
+                    '''
+                }
+            }
+        }
+
+        stage('Wait for SQL Server') {
+            steps {
+                script {
+                    sh '''
+                    echo "Waiting for SQL Server to start..."
+                    sleep 20
+                    '''
+                }
+            }
+        }
+
+        stage('Apply Migrations') {
+            steps {
+                script {
+                    sh '''
+                    docker exec sql111 /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1"
+                    '''
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                script {
+                    sh '''
+                    docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
+                    docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
+                    '''
+                }
+            }
+        }
+
+        stage('Check Images Before Push') {
+            steps {
+                script {
+                    sh 'docker images'
+                }
+            }
+        }
+
+        stage('Docker Login') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
+                    }
+                }
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                script {
+                    sh '''
+                    docker tag bek moonyrise/monitor:bek
+                    docker push moonyrise/monitor:bek
+                    docker tag front moonyrise/monitor:front
+                    docker push moonyrise/monitor:front
                     '''
                 }
             }
@@ -69,51 +115,17 @@ pipeline {
         stage('Deploy Stack') {
             steps {
                 script {
-                    sh 'docker stack deploy -c /var/lib/jenkins/workspace/Diplom_claster/docker-compose.yml $STACK_NAME'
+                    sh '''
+                    docker stack deploy -c docker-compose.yml my_stack
+                    '''
                 }
             }
         }
 
-        stage('Check Services') {
-            steps {
-                script {
-                    sh 'docker service ls'
-                }
-            }
-        }
-
-        stage('Deploy Monitoring Services') {
+        stage('Setup Monitoring') {
             steps {
                 script {
                     sh 'chmod +x run.sh && bash run.sh'
-                }
-            }
-        }
-
-        stage('Push Monitoring Images') {
-            steps {
-                script {
-                    def images = ['grafana', 'prometheus', 'node-exporter', 'alertmanager', 'cadvisor']
-                    for (img in images) {
-                        sh "docker pull prom/${img}:latest || docker pull gcr.io/cadvisor/cadvisor:latest"
-                        sh "docker tag prom/${img}:latest $DOCKER_HUB_REPO:${img}"
-                        sh "docker push $DOCKER_HUB_REPO:${img}"
-                    }
-                }
-            }
-        }
-
-        stage('Show Access Info') {
-            steps {
-                script {
-                    echo "✅ **Доступ к сервисам:**"
-                    echo "📌 **Frontend:** http://<VM_IP>:81"
-                    echo "📌 **Backend:** http://<VM_IP>:5034"
-                    echo "📌 **Grafana:** http://<VM_IP>:3000"
-                    echo "📌 **Prometheus:** http://<VM_IP>:9090"
-                    echo "📌 **AlertManager:** http://<VM_IP>:9093"
-                    echo "📌 **Node Exporter:** http://<VM_IP>:9100"
-                    echo "📌 **cAdvisor:** http://<VM_IP>:8080"
                 }
             }
         }
