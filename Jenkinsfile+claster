@@ -1,13 +1,20 @@
 pipeline {
     agent any
 
+    environment {
+        NETWORK_NAME = "mynetwork"
+        STACK_NAME = "my_stack"
+    }
+
     stages {
-        stage('Cleanup old containers') {
+        stage('Cleanup old services') {
             steps {
                 script {
-                    sh 'docker rm -f bek || true'
-                    sh 'docker rm -f front || true'
-                    sh 'docker rm -f sql111 || true'
+                    sh '''
+                    docker service rm $(docker service ls -q) || true
+                    docker stack rm ${STACK_NAME} || true
+                    docker network rm ${NETWORK_NAME} || true
+                    '''
                 }
             }
         }
@@ -27,22 +34,20 @@ pipeline {
         stage('Create Network') {
             steps {
                 script {
-                    sh 'docker network create mynetwork || true'
+                    sh 'docker network create --driver overlay ${NETWORK_NAME} || true'
                 }
             }
         }
 
-        stage('Create Database') {
+        stage('Create Database Service') {
             steps {
                 script {
                     sh '''
-                    docker run -d \
-                        --name sql111 \
-                        --hostname sql1 \
-                        --network mynetwork \
+                    docker service create --name sql111 \
+                        --network ${NETWORK_NAME} \
                         -e "ACCEPT_EULA=Y" \
                         -e "MSSQL_SA_PASSWORD=Qwerty-1" \
-                        -p 1433:1433 \
+                        --publish 1433:1433 \
                         mcr.microsoft.com/mssql/server:2022-latest
                     '''
                 }
@@ -55,7 +60,7 @@ pipeline {
                     sh '''
                     echo "Waiting for SQL Server to start..."
                     sleep 30
-                    until docker exec sql111 /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1" > /dev/null 2>&1; do
+                    until docker run --rm --network=${NETWORK_NAME} mcr.microsoft.com/mssql/server:2022-latest /opt/mssql-tools/bin/sqlcmd -S sql111 -U SA -P 'Qwerty-1' -Q "SELECT 1" > /dev/null 2>&1; do
                         echo "SQL Server is still starting..."
                         sleep 5
                     done
@@ -65,24 +70,29 @@ pipeline {
             }
         }
 
-        stage('Apply Migrations') {
+        stage('Docker Build') {
             steps {
                 script {
                     sh '''
-                    docker exec sql111 /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1"
-                    docker exec bek dotnet-ef database update --startup-project "ShopApi" --project "DAL/DAL.csproj"
+                    docker build -t bek ./BackEnd/Amazon-clone/
+                    docker build -t front ./FrontEnd/my-app/
                     '''
                 }
             }
         }
 
-        stage('Docker Build') {
+        stage('Push Images to DockerHub') {
             steps {
                 script {
-                    sh '''
-                    docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
-                    docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
-                    '''
+                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh '''
+                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                        docker tag bek moonyrise/monitor:bek
+                        docker push moonyrise/monitor:bek
+                        docker tag front moonyrise/monitor:front
+                        docker push moonyrise/monitor:front
+                        '''
+                    }
                 }
             }
         }
@@ -91,8 +101,16 @@ pipeline {
             steps {
                 script {
                     sh '''
-                    docker stack deploy -c docker-compose.yml my_stack
+                    docker stack deploy -c docker-compose.yml ${STACK_NAME}
                     '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    sh 'docker service ls'
                 }
             }
         }
