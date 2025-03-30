@@ -2,12 +2,14 @@ pipeline {
     agent any
 
     stages {
-        stage('Cleanup old containers') {
+        stage('Cleanup old swarm') {
             steps {
                 script {
-                    sh 'docker rm -f bek || true'
-                    sh 'docker rm -f front || true'
-                    sh 'docker rm -f sql111 || true'
+                    sh '''
+                    if docker info | grep -q "Swarm: active"; then
+                        docker swarm leave --force
+                    fi
+                    '''
                 }
             }
         }
@@ -15,11 +17,7 @@ pipeline {
         stage('Initialize Swarm') {
             steps {
                 script {
-                    sh '''
-                    if ! docker info | grep -q "Swarm: active"; then
-                        docker swarm init --advertise-addr $(hostname -I | awk '{print $1}')
-                    fi
-                    '''
+                    sh 'docker swarm init --advertise-addr $(hostname -I | awk "{print $1}")'
                 }
             }
         }
@@ -32,44 +30,27 @@ pipeline {
             }
         }
 
-        stage('Deploy Database') {
+        stage('Build Images') {
             steps {
                 script {
                     sh '''
-                    docker service create --name sql111 \
-                        --network mynetwork \
-                        -e ACCEPT_EULA=Y \
-                        -e MSSQL_SA_PASSWORD=Qwerty-1 \
-                        --publish 1433:1433 \
-                        mcr.microsoft.com/mssql/server:2022-latest
+                    docker build -t moonyrise/monitor:bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
+                    docker build -t moonyrise/monitor:front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
                     '''
                 }
             }
         }
 
-        stage('Wait for SQL Server') {
+        stage('Push Images') {
             steps {
                 script {
-                    sh '''
-                    echo "Waiting for SQL Server to start..."
-                    sleep 30
-                    until docker exec $(docker ps -q --filter "name=sql111") /opt/mssql-tools/bin/sqlcmd -S sql111 -U SA -P 'Qwerty-1' -Q "SELECT 1" > /dev/null 2>&1; do
-                        echo "SQL Server is still starting..."
-                        sleep 5
-                    done
-                    echo "SQL Server is up and running!"
-                    '''
-                }
-            }
-        }
-
-        stage('Docker Build') {
-            steps {
-                script {
-                    sh '''
-                    docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
-                    docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
-                    '''
+                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh '''
+                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                        docker push moonyrise/monitor:bek
+                        docker push moonyrise/monitor:front
+                        '''
+                    }
                 }
             }
         }
@@ -78,6 +59,14 @@ pipeline {
             steps {
                 script {
                     sh 'docker stack deploy -c docker-compose.yml my_stack'
+                }
+            }
+        }
+
+        stage('Check Services') {
+            steps {
+                script {
+                    sh 'docker stack services my_stack'
                 }
             }
         }
