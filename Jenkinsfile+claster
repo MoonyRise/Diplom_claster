@@ -54,7 +54,12 @@ pipeline {
                 script {
                     sh '''
                     echo "Waiting for SQL Server to start..."
-                    sleep 20
+                    sleep 30
+                    until docker exec sql111 /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1" > /dev/null 2>&1; do
+                        echo "SQL Server is still starting..."
+                        sleep 5
+                    done
+                    echo "SQL Server is up and running!"
                     '''
                 }
             }
@@ -65,6 +70,7 @@ pipeline {
                 script {
                     sh '''
                     docker exec sql111 /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1"
+                    docker exec bek dotnet-ef database update --startup-project "ShopApi" --project "DAL/DAL.csproj"
                     '''
                 }
             }
@@ -81,51 +87,12 @@ pipeline {
             }
         }
 
-        stage('Check Images Before Push') {
-            steps {
-                script {
-                    sh 'docker images'
-                }
-            }
-        }
-
-        stage('Docker Login') {
-            steps {
-                script {
-                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                        sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
-                    }
-                }
-            }
-        }
-
-        stage('Docker Push') {
-            steps {
-                script {
-                    sh '''
-                    docker tag bek moonyrise/monitor:bek
-                    docker push moonyrise/monitor:bek
-                    docker tag front moonyrise/monitor:front
-                    docker push moonyrise/monitor:front
-                    '''
-                }
-            }
-        }
-
         stage('Deploy Stack') {
             steps {
                 script {
                     sh '''
                     docker stack deploy -c docker-compose.yml my_stack
                     '''
-                }
-            }
-        }
-
-        stage('Setup Monitoring') {
-            steps {
-                script {
-                    sh 'chmod +x run.sh && bash run.sh'
                 }
             }
         }
