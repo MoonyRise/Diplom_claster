@@ -2,14 +2,12 @@ pipeline {
     agent any
 
     stages {
-        stage('Cleanup old swarm') {
+        stage('Cleanup old containers') {
             steps {
                 script {
-                    sh '''
-                    if docker info | grep -q "Swarm: active"; then
-                        docker swarm leave --force
-                    fi
-                    '''
+                    sh 'docker rm -f bek || true'
+                    sh 'docker rm -f front || true'
+                    sh 'docker rm -f sql111 || true'
                 }
             }
         }
@@ -17,7 +15,11 @@ pipeline {
         stage('Initialize Swarm') {
             steps {
                 script {
-                    sh 'docker swarm init --advertise-addr $(hostname -I | awk "{print $1}")'
+                    sh '''
+                    if ! docker info | grep -q "Swarm: active"; then
+                        docker swarm init --advertise-addr $(ip -o -4 addr show $(ip -o -4 route show to default | awk "{print $9}") | awk "{print $4}" | cut -d"/" -f1)
+                    fi
+                    '''
                 }
             }
         }
@@ -30,27 +32,55 @@ pipeline {
             }
         }
 
-        stage('Build Images') {
+        stage('Create Database') {
             steps {
                 script {
                     sh '''
-                    docker build -t moonyrise/monitor:bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
-                    docker build -t moonyrise/monitor:front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
+                    docker service create --name sql111 \
+                        --network mynetwork \
+                        -e "ACCEPT_EULA=Y" \
+                        -e "MSSQL_SA_PASSWORD=Qwerty-1" \
+                        --publish 1433:1433 \
+                        mcr.microsoft.com/mssql/server:2022-latest
                     '''
                 }
             }
         }
 
-        stage('Push Images') {
+        stage('Wait for SQL Server') {
             steps {
                 script {
-                    withCredentials([usernamePassword(credentialsId: 'eab6834c-3d63-451c-a362-bf326e7b1c6b', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                        sh '''
-                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
-                        docker push moonyrise/monitor:bek
-                        docker push moonyrise/monitor:front
-                        '''
-                    }
+                    sh '''
+                    echo "Waiting for SQL Server to start..."
+                    sleep 30
+                    until docker exec $(docker ps -q --filter "name=sql111") /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1" > /dev/null 2>&1; do
+                        echo "SQL Server is still starting..."
+                        sleep 5
+                    done
+                    echo "SQL Server is up and running!"
+                    '''
+                }
+            }
+        }
+
+        stage('Apply Migrations') {
+            steps {
+                script {
+                    sh '''
+                    docker exec $(docker ps -q --filter "name=sql111") /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Qwerty-1' -Q "SELECT 1"
+                    docker exec bek dotnet-ef database update --startup-project "ShopApi" --project "DAL/DAL.csproj"
+                    '''
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                script {
+                    sh '''
+                    docker build -t bek /var/lib/jenkins/workspace/Diplom_moon/BackEnd/Amazon-clone/
+                    docker build -t front /var/lib/jenkins/workspace/Diplom_moon/FrontEnd/my-app/
+                    '''
                 }
             }
         }
@@ -59,14 +89,6 @@ pipeline {
             steps {
                 script {
                     sh 'docker stack deploy -c docker-compose.yml my_stack'
-                }
-            }
-        }
-
-        stage('Check Services') {
-            steps {
-                script {
-                    sh 'docker stack services my_stack'
                 }
             }
         }
