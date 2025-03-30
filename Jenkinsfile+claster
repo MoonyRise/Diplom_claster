@@ -15,11 +15,12 @@ pipeline {
         stage('Initialize Swarm') {
             steps {
                 script {
-                    sh '''
+                    def ipAddr = sh(script: "hostname -I | awk '{print $1}'", returnStdout: true).trim()
+                    sh """
                     if ! docker info | grep -q "Swarm: active"; then
-                        docker swarm init --advertise-addr $(ip -o -4 addr show $(ip -o -4 route show to default | awk "{print $9}") | awk "{print $4}" | cut -d"/" -f1)
+                        docker swarm init --advertise-addr ${ipAddr}
                     fi
-                    '''
+                    """
                 }
             }
         }
